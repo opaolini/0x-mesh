@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"time"
@@ -28,6 +29,10 @@ const (
 	blockWatcherRetentionLimit  = 40
 	ethereumRPCRequestTimeout   = 30 * time.Second
 	ethWatcherPollingInterval   = 5 * time.Second
+)
+
+var (
+	errInternal = errors.New("internal error")
 )
 
 type meshEnvVars struct {
@@ -71,9 +76,9 @@ func main() {
 		log.WithField("err", err.Error()).Fatal("fatal error while starting app")
 	}
 	defer app.close()
-	// TODO(albrow): Really we shouldn't exit main unless there's a fatal error.
-	// This is just here as an ad hoc test to make sure close works correctly.
-	time.Sleep(30 * time.Second)
+
+	// Block forever
+	select {}
 }
 
 func newApp() (*application, error) {
@@ -224,10 +229,18 @@ func (app *application) GetMessagesToShare(max int) ([][]byte, error) {
 	}
 	selectedOrders := allOrders[start:end]
 
+	log.WithFields(map[string]interface{}{
+		"maxNumberToShare":    max,
+		"actualNumberToShare": len(selectedOrders),
+	}).Debug("preparing to share orders with peers")
+
 	// After we have selected all the orders to share, we need to encode them to
 	// the message data format.
 	messageData := make([][]byte, len(selectedOrders))
 	for i, order := range selectedOrders {
+		log.WithFields(map[string]interface{}{
+			"order": order,
+		}).Debug("selected order to share")
 		encoded, err := encodeOrder(order.SignedOrder)
 		if err != nil {
 			return nil, err
@@ -254,6 +267,11 @@ func (app *application) ValidateAndStore(messages []*core.Message) ([]*core.Mess
 		if _, alreadySeen := orderHashToMessage[orderHash]; alreadySeen {
 			continue
 		}
+		log.WithFields(map[string]interface{}{
+			"order":     order,
+			"orderHash": orderHash,
+			"from":      msg.From.String(),
+		}).Debug("received order from peer")
 		orders = append(orders, order)
 		orderHashToMessage[orderHash] = msg
 	}
@@ -269,7 +287,11 @@ func (app *application) ValidateAndStore(messages []*core.Message) ([]*core.Mess
 		if !found {
 			continue
 		}
-		if orderInfo.OrderStatus == zeroex.Fillable {
+		if zeroex.IsOrderValid(orderInfo) {
+			log.WithFields(map[string]interface{}{
+				"orderInfo": orderInfo,
+				"from":      msg.From.String(),
+			}).Debug("storing valid order received from peer")
 			validMessages = append(validMessages, msg)
 			// Watch stores the message in the database.
 			// TODO(albrow): Implement `Exists` method in database and only watch
@@ -277,6 +299,11 @@ func (app *application) ValidateAndStore(messages []*core.Message) ([]*core.Mess
 			if err := app.orderWatcher.Watch(orderInfo); err != nil {
 				return nil, err
 			}
+		} else {
+			log.WithFields(map[string]interface{}{
+				"orderInfo": orderInfo,
+				"from":      msg.From.String(),
+			}).Debug("not storing invalid order received from peer")
 		}
 	}
 	return validMessages, nil
@@ -286,6 +313,7 @@ func (app *application) start() error {
 	go func() {
 		err := app.node.Start()
 		if err != nil {
+			log.WithField("error", err.Error()).Error("core node returned error")
 			app.close()
 		}
 	}()
@@ -314,6 +342,7 @@ func (app *application) start() error {
 	go func() {
 		err := app.wsServer.Listen()
 		if err != nil {
+			log.WithField("error", err.Error()).Error("RPC server returned error")
 			app.close()
 		}
 	}()
@@ -328,7 +357,32 @@ func (app *application) start() error {
 
 // AddOrder is called when an RPC client sends an AddOrder request.
 func (app *application) AddOrder(order *zeroex.SignedOrder) error {
-	log.Info("AddOrder was called")
+	log.Info("received order via RPC")
+	orderHash, err := order.ComputeOrderHash()
+	if err != nil {
+		log.WithField("order", order).Error("received order via RPC but could not compute order hash")
+		return errInternal
+	}
+	orderHashToOrderInfo := app.orderValidator.BatchValidate([]*zeroex.SignedOrder{order})
+	orderInfo, found := orderHashToOrderInfo[orderHash]
+	if !found {
+		log.WithField("order", order).Error("received order via RPC but could not validate it")
+		return errInternal
+	}
+	if !zeroex.IsOrderValid(orderInfo) {
+		log.WithField("orderInfo", orderInfo).Error("received invalid order via RPC")
+		return errors.New("invalid order")
+	}
+
+	log.WithField("orderInfo", orderInfo).Error("order received via RPC is valid")
+	if err := app.orderWatcher.Watch(orderInfo); err != nil {
+		log.WithFields(map[string]interface{}{
+			"orderInfo": orderInfo,
+			"error":     err.Error(),
+		}).Error("received valid order via RPC but could not watch it")
+		return errInternal
+	}
+
 	return nil
 }
 
