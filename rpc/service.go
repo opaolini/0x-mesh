@@ -17,8 +17,8 @@ type rpcService struct {
 
 // RPCHandler is used to respond to incoming requests from the client.
 type RPCHandler interface {
-	// AddOrder is called when the client sends an AddOrder request.
-	AddOrder(order *zeroex.SignedOrder) error
+	// AddOrders is called when the client sends an AddOrders request.
+	AddOrders(orders []*zeroex.SignedOrder) (zeroex.OrderHashToSuccinctOrderInfo, error)
 	// AddPeer is called when the client sends an AddPeer request.
 	AddPeer(peerInfo peerstore.PeerInfo) error
 	// Orders is called when a client sends a Subscribe to orderStream request
@@ -30,17 +30,14 @@ func (s *rpcService) Orders(ctx context.Context) (*rpc.Subscription, error) {
 	return s.rpcHandler.Orders(ctx)
 }
 
-// AddOrder calls rpcHandler.AddOrder and returns the computed order hash.
-// TODO(albrow): Add the ability to send multiple orders at once.
-func (s *rpcService) AddOrder(order *zeroex.SignedOrder) (orderHashHex string, err error) {
-	orderHash, err := order.ComputeOrderHash()
+// AddOrders calls rpcHandler.AddOrders and returns the SuccinctOrderInfo for each order.
+func (s *rpcService) AddOrders(orders []*zeroex.SignedOrder) (string, error) {
+	orderHashToSuccinctOrderInfo, err := s.rpcHandler.AddOrders(orders)
 	if err != nil {
 		return "", err
 	}
-	if err := s.rpcHandler.AddOrder(order); err != nil {
-		return "", err
-	}
-	return orderHash.Hex(), nil
+	orderHashToSuccinctOrderInfoBytes, err := json.Marshal(orderHashToSuccinctOrderInfo)
+	return string(orderHashToSuccinctOrderInfoBytes), nil
 }
 
 // AddPeer builds PeerInfo out of the given peer ID and multiaddresses and

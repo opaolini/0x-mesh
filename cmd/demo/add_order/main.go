@@ -68,11 +68,11 @@ func main() {
 		log.WithError(err).Fatal("could not sign 0x order")
 	}
 
-	hash, err := client.AddOrder(signedTestOrder)
+	orderHashToSuccinctOrderInfo, err := client.AddOrders([]*zeroex.SignedOrder{signedTestOrder})
 	if err != nil {
 		log.WithError(err).Fatal("error from AddOrder")
 	} else {
-		log.Printf("added valid order: %s", hash.Hex())
+		log.Printf("submitted %d orders", len(orderHashToSuccinctOrderInfo))
 	}
 
 	orderInfos := <-orderInfosChan
